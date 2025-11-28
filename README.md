@@ -112,11 +112,4 @@ Early test version of tariff management:
 > ⚠️ Feature is still in testing stage.
 
 ---
-
-## 🧩 Signature
-
-Every bot message includes:
-
-
-
 ## ❤️ Credits code: @memes4u1337
