@@ -1,5 +1,5 @@
 <?php
-
+// index.php — главная страница админ-панели
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
@@ -173,7 +173,7 @@ $kpiUsersFreeAll    = $hasUserPlans ? (int)scalar($pdo, "SELECT COUNT(*) FROM v_
 $kpiUsersStartAll   = $hasUserPlans ? (int)scalar($pdo, "SELECT COUNT(*) FROM v_user_search_plans WHERE plan_code = 'start'") : 0;
 $kpiUsersPremiumAll = $hasUserPlans ? (int)scalar($pdo, "SELECT COUNT(*) FROM v_user_search_plans WHERE plan_code = 'premium'") : 0;
 
-// деньги — нули , заглушка
+// деньги — нули, пока нет таблиц выручки
 $kpiMoneyTotalAll   = 0;
 $kpiMoneyStartAll   = 0;
 $kpiMoneyPremiumAll = 0;
@@ -354,6 +354,7 @@ $kpiMoneySearchAll  = 0;
         .logs-filters .chip { font-size:11px; padding:4px 10px; }
 
         .table-container { overflow-x:auto; }
+        /* Важное требование: у блока логов не скроллим внутри — всё через пагинацию */
         #logs-panel .table-container { overflow: visible; }
 
         table.data-table { width:100%; border-collapse: collapse; }
@@ -568,7 +569,7 @@ $kpiMoneySearchAll  = 0;
 </head>
 <body>
  <div class="app-container">
-      
+        <!-- Compact Sidebar -->
         <aside class="sidebar">
             <div class="sidebar-header">
                 <div class="logo">A</div>
@@ -618,7 +619,7 @@ $kpiMoneySearchAll  = 0;
                         </label>
                         <div class="submenu">
                             <a href="new_tariffs.php"><i class="fas fa-plus"></i><span>Создать новый тариф</span></a>
-                            <a href="succes_kwork.php"><i class="fas fa-spinner"></i><span>Все Тарифы</span></a>
+                            <a href="all_tariffs.php"><i class="fas fa-spinner"></i><span>Все Тарифы</span></a>
                         </div>
                     </div>
 
@@ -629,23 +630,24 @@ $kpiMoneySearchAll  = 0;
                            <i class="fa-solid fa-circle-dollar-to-slot"></i><span>Лимиты</span>
                         </label>
                         <div class="submenu">
-                            <a href="edit_pay.php"><i class="fa-solid fa-circle-plus"></i><span>Создать новый лимит</span></a>
-                            <a href="succes_pay.php"><i class="fa-solid fa-rotate"></i><span>Все лимиты</span></a>
+                            <a href="new_limit.php"><i class="fa-solid fa-circle-plus"></i><span>Создать новый лимит</span></a>
+                            <a href="all_limit.php"><i class="fa-solid fa-rotate"></i><span>Все лимиты</span></a>
                         </div>
                     </div>
                 </div>
 
                 <!-- ГРУППА: Уведомления -->
                 <div class="nav-group">
-                    <div class="nav-header">Уведомления</div>
+                    <div class="nav-header">Система подарков</div>
 
                     <div class="nav-accordion">
                         <input id="acc-announce" type="checkbox">
                         <label class="nav-item nav-toggle" for="acc-announce">
-                            <i class="fa-solid fa-rectangle-ad"></i><span>Объявление</span>
+                            <i class="fa-solid fa-gifts"></i><span>Подарки</span>
                         </label>
                         <div class="submenu">
-                            <a href="new_message.php"><i class="fa-solid fa-reply-all"></i><span>Создать oбъявление</span></a>
+                            <a href="new_gift.php"><i class="fa-solid fa-gift"></i><span>Создать подарок</span></a>
+							<a href="all_gift.php"><i class="fa-solid fa-hand-holding-dollar"></i><span>Список подароков</span></a>
                         </div>
                     </div>
                 </div>
@@ -653,7 +655,7 @@ $kpiMoneySearchAll  = 0;
                    <div class="nav-header">Сотрудники</div>
 
                      <div class="nav-accordion">
-                     
+                     <!-- УНИКАЛЬНЫЙ id -->
                      <input id="acc-test" type="checkbox">
                      <label class="nav-item nav-toggle" for="acc-test">
                      <i class="fa-solid fa-user-plus"></i></i><span>Сотрудники</span>
@@ -668,7 +670,7 @@ $kpiMoneySearchAll  = 0;
 
             </nav>
 
-            <!-- КАРТОЧКА ПОЛЬЗОВАТЕЛЯ-->
+            <!-- КАРТОЧКА ПОЛЬЗОВАТЕЛЯ / АДМИНА В САЙДБАРЕ -->
             <div class="sidebar-footer">
                 <div class="user-card">
                     <div class="user-avatar">
@@ -685,7 +687,7 @@ $kpiMoneySearchAll  = 0;
             </div>
         </aside>
 
-        <!-- основа -->
+        <!-- Main Content -->
         <main class="main-content">
             <header class="top-bar">
                 <div class="page-title">
@@ -707,7 +709,7 @@ $kpiMoneySearchAll  = 0;
                     </div>
                 </div>
 
-                <!-- Динамические KPI-->
+                <!-- Динамические KPI (первичный рендер, дальше перезапишет AJAX) -->
                 <div class="stats-grid" id="dynamic-kpis">
                     <div class="stat-card tone-primary">
                         <div class="stat-header">
@@ -739,7 +741,7 @@ $kpiMoneySearchAll  = 0;
                     </div>
                 </div>
 
-                <!-- ПАНЕЛЬ ЛОГОВ -->
+                <!-- ПАНЕЛЬ ЛОГОВ (из таблицы logs) -->
                 <div class="panel" id="logs-panel">
                     <div class="panel-header">
                         <div class="panel-title">
@@ -751,7 +753,7 @@ $kpiMoneySearchAll  = 0;
                             </div>
                         </div>
                         <div class="panel-actions">
-                            
+                            <!-- Кнопки обновить/пауза убраны по ТЗ -->
                         </div>
                     </div>
 
@@ -813,7 +815,7 @@ $kpiMoneySearchAll  = 0;
 
     <script>
         document.addEventListener('DOMContentLoaded', function() {
-            
+            // ==== Ripple эффект по клику (как у тебя было, без морганий блоков) ====
             const buttons = document.querySelectorAll('.btn');
             buttons.forEach(btn => {
                 btn.addEventListener('click', function(e) {

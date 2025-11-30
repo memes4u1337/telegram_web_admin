@@ -1,4 +1,5 @@
 <?php
+// users.php — список пользователей бота
 
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
@@ -76,7 +77,38 @@ function userInitial(string $s): string {
     return strtoupper(substr($s, 0, 1));
 }
 
-/* ---------- строгая проверка ADMIN ---------- */
+/**
+ * Рендер HTML карточки текущего плана (для вкладки "Подписка")
+ */
+function renderPlanCardHtml(?array $planInfo): string {
+    ob_start();
+    if ($planInfo): ?>
+        <div style="margin-bottom:18px;padding:12px 14px;border-radius:10px;border:1px solid rgba(139,92,246,.4);background:rgba(15,23,42,.85);animation:fadeIn .3s ease-out;">
+            <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:#ffffff;">
+                <i class="fa-solid fa-crown" style="margin-right:6px;color:#facc15;"></i>Текущий тариф
+            </div>
+            <div style="font-size:13px;color:#b8b8d6;margin-bottom:4px;">
+                <?php echo h($planInfo['plan_title'] ?? $planInfo['plan_code']); ?>
+                <span style="opacity:.7;">(<?php echo h($planInfo['plan_code']); ?>)</span>
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:10px;font-size:12px;color:#b8b8d6;">
+                <span>Лимит в день: <strong><?php echo (int)($planInfo['plan_daily_limit'] ?? 0); ?></strong></span>
+                <span>Использовано сегодня: <strong><?php echo (int)($planInfo['used_today'] ?? 0); ?></strong></span>
+                <span>Осталось: <strong><?php echo (int)($planInfo['remaining_today'] ?? 0); ?></strong></span>
+                <?php if (!empty($planInfo['last_reset_date'])): ?>
+                    <span>Последний сброс: <strong><?php echo h(date('d.m.Y', strtotime($planInfo['last_reset_date']))); ?></strong></span>
+                <?php endif; ?>
+            </div>
+        </div>
+    <?php else: ?>
+        <div style="margin-bottom:18px;font-size:13px;color:#6c6c8c;animation:fadeIn .3s ease-out;">
+            Тариф не назначен (пользователь на базовом лимите).
+        </div>
+    <?php endif;
+    return ob_get_clean();
+}
+
+/* ---------- строгая проверка ADMIN как в index.php ---------- */
 $LOGIN_URL = '/login.php';
 
 // Проверяем сессию админа
@@ -139,7 +171,7 @@ if (!$adminExists || (int)$adminRow['is_active'] !== 1) {
 
 $adminDisplay = $adminRow['name'] ?: $adminRow['email'];
 
-/* ---------- AJAX: детальная инфа по юзеру (вся инфа из SQL) ---------- */
+/* ---------- AJAX: детальная инфа по юзеру (вкладки Информация / Подписка) ---------- */
 if (isset($_POST['ajax']) && $_POST['ajax'] === 'user_details') {
     header('Content-Type: text/html; charset=utf-8');
 
@@ -177,12 +209,29 @@ if (isset($_POST['ajax']) && $_POST['ajax'] === 'user_details') {
             }
         }
 
+        // Список доступных планов для ручного выбора
+        $plans = [];
+        try {
+            if (tableExists($pdo, 'search_plans')) {
+                $qPlans = $pdo->query("
+                    SELECT code, title, daily_limit 
+                    FROM search_plans 
+                    WHERE is_active = 1 
+                    ORDER BY sort_order, title
+                ");
+                $plans = $qPlans->fetchAll(PDO::FETCH_ASSOC);
+            }
+        } catch (Throwable $e) {
+            error_log('users.php search_plans fetch error: ' . $e->getMessage());
+        }
+
         $displayName = trim(($u['first_name'] ?? '') . ' ' . ($u['last_name'] ?? ''));
         if ($displayName === '') {
             $displayName = $u['name_telegram_profile'] ?: ($u['username'] ? '@'.$u['username'] : 'Пользователь');
         }
 
-        $avatarLetter = userInitial($displayName);
+        // Фото или заглушка
+        $avatarUrl = !empty($u['avatar_path']) ? $u['avatar_path'] : '/love/panel/assets/img/user.png';
 
         $fmtDateTime = function($v) {
             if (empty($v) || $v === '0000-00-00 00:00:00') return '—';
@@ -209,161 +258,197 @@ if (isset($_POST['ajax']) && $_POST['ajax'] === 'user_details') {
         }
 
         ?>
-        <div class="user-details-modal" style="padding: 22px;">
-            <div style="display:flex;align-items:center;gap:16px;margin-bottom:18px;">
-                <div style="width:64px;height:64px;border-radius:12px;background:linear-gradient(135deg,#8b5cf6,#a855f7);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:22px;box-shadow:0 10px 25px rgba(0,0,0,.45);">
-                    <?php echo h($avatarLetter); ?>
+        <div class="user-details-modal" data-user-id="<?php echo (int)$u['id']; ?>" style="padding: 0;">
+            <div style="padding: 18px 22px 12px 22px;border-bottom:1px solid rgba(51,65,85,.8);background:rgba(15,23,42,.95);">
+                <div style="display:flex;align-items:center;gap:16px;margin-bottom:14px;">
+                    <div style="width:64px;height:64px;border-radius:12px;background:linear-gradient(135deg,#8b5cf6,#a855f7);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:22px;box-shadow:0 10px 25px rgba(0,0,0,.45);overflow:hidden;animation:pulseGlow 2.6s ease-in-out infinite;">
+                        <img src="<?php echo h($avatarUrl); ?>" alt="avatar" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;border:1px solid rgba(148,163,184,.5);">
+                    </div>
+                    <div>
+                        <div style="font-size:18px;font-weight:600;margin-bottom:4px;"><?php echo h($displayName); ?></div>
+                        <div style="font-size:13px;color:#b8b8d6;">
+                            ID: #<?php echo (int)$u['id']; ?>
+                            <?php if (!empty($u['username'])): ?>
+                                · @<?php echo h($u['username']); ?>
+                            <?php endif; ?>
+                        </div>
+                        <div style="font-size:12px;color:#6c6c8c;margin-top:2px;">
+                            Создан: <?php echo h($fmtDateTime($u['created_at'] ?? '')); ?> · Обновлён: <?php echo h($fmtDateTime($u['updated_at'] ?? '')); ?>
+                        </div>
+                    </div>
                 </div>
-                <div>
-                    <div style="font-size:18px;font-weight:600;margin-bottom:4px;"><?php echo h($displayName); ?></div>
-                    <div style="font-size:13px;color:#b8b8d6;">
-                        ID: #<?php echo (int)$u['id']; ?>
-                        <?php if (!empty($u['username'])): ?>
-                            · @<?php echo h($u['username']); ?>
+
+                <!-- tabs -->
+                <div class="tabs-switcher" style="margin-top:14px;display:inline-flex;padding:3px;border-radius:999px;background:rgba(15,23,42,.9);border:1px solid rgba(148,163,184,.45);">
+                    <button type="button" class="tab-btn active" data-tab="info" style="border:none;background:transparent;padding:6px 16px;border-radius:999px;font-size:12px;font-weight:500;color:#e5e7eb;cursor:pointer;transition:all .2s;">
+                        Информация
+                    </button>
+                    <button type="button" class="tab-btn" data-tab="subscription" style="border:none;background:transparent;padding:6px 16px;border-radius:999px;font-size:12px;font-weight:500;color:#9ca3af;cursor:pointer;transition:all .2s;">
+                        Подписка
+                    </button>
+                </div>
+            </div>
+
+            <div style="padding: 18px 22px 22px 22px;">
+                <!-- TAB: Информация -->
+                <div class="tab-content tab-content-info active">
+                    <div style="display:grid;grid-template-columns:1.15fr 1fr;gap:18px;margin-bottom:18px;">
+                        <div>
+                            <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:#ffffff;">Основное</div>
+                            <div style="display:grid;grid-template-columns:140px 1fr;row-gap:6px;font-size:13px;">
+                                <div style="color:#6c6c8c;">Telegram ID</div>
+                                <div><?php echo h($u['tg_id']); ?></div>
+
+                                <div style="color:#6c6c8c;">Username</div>
+                                <div><?php echo $u['username'] ? '@'.h($u['username']) : '—'; ?></div>
+
+                                <div style="color:#6c6c8c;">Имя</div>
+                                <div><?php echo $u['first_name'] ? h($u['first_name']) : '—'; ?></div>
+
+                                <?php if (!empty($u['last_name'])): ?>
+                                    <div style="color:#6c6c8c;">Фамилия</div>
+                                    <div><?php echo h($u['last_name']); ?></div>
+                                <?php endif; ?>
+
+                                <?php if (!empty($u['name_telegram_profile'])): ?>
+                                    <div style="color:#6c6c8c;">Имя в профиле TG</div>
+                                    <div><?php echo h($u['name_telegram_profile']); ?></div>
+                                <?php endif; ?>
+
+                                <div style="color:#6c6c8c;">Язык Telegram</div>
+                                <div><?php echo $u['language_code'] ? h($u['language_code']) : '—'; ?></div>
+
+                                <div style="color:#6c6c8c;">Язык приложения</div>
+                                <div><?php echo $u['app_language'] ? h($u['app_language']) : '—'; ?></div>
+
+                                <div style="color:#6c6c8c;">Онбординг</div>
+                                <div><?php echo h($onboarding); ?></div>
+
+                                <div style="color:#6c6c8c;">Профиль в webapp</div>
+                                <div><?php echo h($webapp); ?></div>
+                            </div>
+                        </div>
+
+                        <div>
+                            <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:#ffffff;">Профиль</div>
+                            <div style="display:grid;grid-template-columns:140px 1fr;row-gap:6px;font-size:13px;">
+                                <div style="color:#6c6c8c;">Дата рождения</div>
+                                <div><?php echo h($fmtDate($u['birth_date'] ?? '')); ?></div>
+
+                                <div style="color:#6c6c8c;">Знак зодиака</div>
+                                <div><?php echo $u['zodiac_sign'] ? h($u['zodiac_sign']) : '—'; ?></div>
+
+                                <div style="color:#6c6c8c;">Пол</div>
+                                <div><?php echo $u['gender'] ? h($u['gender']) : '—'; ?></div>
+
+                                <div style="color:#6c6c8c;">Ищет</div>
+                                <div><?php echo $u['seeking_gender'] ? h($u['seeking_gender']) : '—'; ?></div>
+
+                                <div style="color:#6c6c8c;">Локация</div>
+                                <div><?php echo $u['location'] ? h($u['location']) : '—'; ?></div>
+
+                                <div style="color:#6c6c8c;">Тип семьи</div>
+                                <div><?php echo $u['family_type'] ? h($u['family_type']) : '—'; ?></div>
+
+                                <div style="color:#6c6c8c;">Тип семьи родителей</div>
+                                <div><?php echo $u['parents_family_type'] ? h($u['parents_family_type']) : '—'; ?></div>
+
+                                <div style="color:#6c6c8c;">Деятельность родителей</div>
+                                <div><?php echo $u['parents_main_activity'] ? h($u['parents_main_activity']) : '—'; ?></div>
+
+                                <div style="color:#6c6c8c;">Сфера партнёра</div>
+                                <div><?php echo $u['partner_activity_scope'] ? h($u['partner_activity_scope']) : '—'; ?></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;">
+                        <div>
+                            <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:#ffffff;">Требования к партнёру</div>
+                            <?php if ($partnerReq): ?>
+                                <ul style="margin:0;padding-left:18px;font-size:13px;color:#b8b8d6;">
+                                    <?php foreach ($partnerReq as $item): ?>
+                                        <li style="animation:fadeIn .3s ease-out;"><?php echo h(is_array($item) ? json_encode($item, JSON_UNESCAPED_UNICODE) : $item); ?></li>
+                                    <?php endforeach; ?>
+                                </ul>
+                            <?php else: ?>
+                                <div style="font-size:13px;color:#6c6c8c;">Не заполнено</div>
+                            <?php endif; ?>
+                        </div>
+
+                        <div>
+                            <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:#ffffff;">Собственные качества</div>
+                            <?php if ($selfTraits): ?>
+                                <ul style="margin:0;padding-left:18px;font-size:13px;color:#b8b8d6;">
+                                    <?php foreach ($selfTraits as $item): ?>
+                                        <li style="animation:fadeIn .3s ease-out;"><?php echo h(is_array($item) ? json_encode($item, JSON_UNESCAPED_UNICODE) : $item); ?></li>
+                                    <?php endforeach; ?>
+                                </ul>
+                            <?php else: ?>
+                                <div style="font-size:13px;color:#6c6c8c;">Не заполнено</div>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+
+                    <div style="margin-top:18px;display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;font-size:13px;">
+                        <div>
+                            <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:#ffffff;">Предпочтения в партнёре</div>
+                            <div style="color:#b8b8d6;white-space:pre-wrap;"><?php echo $u['partner_preferences'] ? h($u['partner_preferences']) : 'Не заполнено'; ?></div>
+                        </div>
+                        <div>
+                            <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:#ffffff;">Вредные привычки</div>
+                            <div style="color:#b8b8d6;white-space:pre-wrap;"><?php echo $u['bad_habits'] ? h($u['bad_habits']) : 'Не заполнено'; ?></div>
+                        </div>
+                        <div>
+                            <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:#ffffff;">Жизненные приоритеты</div>
+                            <div style="color:#b8b8d6;white-space:pre-wrap;"><?php echo $u['life_priorities'] ? h($u['life_priorities']) : 'Не заполнено'; ?></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TAB: Подписка -->
+                <div class="tab-content tab-content-subscription" style="display:none;">
+                    <div class="subscription-current">
+                        <?php echo renderPlanCardHtml($planInfo); ?>
+                    </div>
+
+                    <div style="margin-top:4px;padding:12px 14px;border-radius:10px;border:1px solid rgba(55,65,81,.9);background:rgba(15,23,42,.9);animation:slideUp .25s ease-out;">
+                        <div style="font-size:13px;font-weight:600;margin-bottom:10px;color:#ffffff;">
+                            Ручное изменение подписки
+                        </div>
+
+                        <?php if ($plans): ?>
+                            <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;">
+                                <div style="flex:1;min-width:220px;">
+                                    <label for="planSelect" style="display:block;font-size:12px;color:#b8b8d6;margin-bottom:4px;">Тариф</label>
+                                    <select id="planSelect" class="form-input" style="width:100%;min-width:0;padding-right:28px;">
+                                        <?php
+                                        $currentCode = $planInfo['plan_code'] ?? ($u['tariff_code'] ?? 'free');
+                                        foreach ($plans as $p):
+                                            $code = (string)$p['code'];
+                                            $selected = ($code === $currentCode) ? 'selected' : '';
+                                            ?>
+                                            <option value="<?php echo h($code); ?>" <?php echo $selected; ?>>
+                                                <?php echo h($p['title']); ?> (<?php echo h($code); ?>, <?php echo (int)$p['daily_limit']; ?>/день)
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                </div>
+                                <div>
+                                    <button type="button" class="btn btn-primary" id="savePlanBtn">
+                                        <i class="fa-solid fa-floppy-disk"></i> Сохранить
+                                    </button>
+                                </div>
+                            </div>
+                            <div style="margin-top:8px;font-size:11px;color:#6c6c8c;">
+                                При смене тарифа счётчик дневного лимита будет сброшен на 0 для выбранного плана.
+                            </div>
+                        <?php else: ?>
+                            <div style="font-size:13px;color:#ef4444;">
+                                Таблица тарифов не найдена или пустая. Нечего выбрать.
+                            </div>
                         <?php endif; ?>
                     </div>
-                    <div style="font-size:12px;color:#6c6c8c;margin-top:2px;">
-                        Создан: <?php echo h($fmtDateTime($u['created_at'] ?? '')); ?> · Обновлён: <?php echo h($fmtDateTime($u['updated_at'] ?? '')); ?>
-                    </div>
-                </div>
-            </div>
-
-            <?php if (!empty($u['avatar_path'])): ?>
-                <div style="margin-bottom:18px;">
-                    <div style="font-size:12px;color:#b8b8d6;margin-bottom:4px;">Аватар</div>
-                    <div style="display:flex;align-items:center;gap:10px;">
-                        <img src="<?php echo h($u['avatar_path']); ?>" alt="avatar" style="max-width:72px;max-height:72px;border-radius:10px;border:1px solid rgba(148,163,184,.5);object-fit:cover;">
-                        <div style="font-size:12px;color:#6c6c8c;word-break:break-all;"><?php echo h($u['avatar_path']); ?></div>
-                    </div>
-                </div>
-            <?php endif; ?>
-
-            <div style="display:grid;grid-template-columns:1.15fr 1fr;gap:18px;margin-bottom:18px;">
-                <div>
-                    <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:#ffffff;">Основное</div>
-                    <div style="display:grid;grid-template-columns:140px 1fr;row-gap:6px;font-size:13px;">
-                        <div style="color:#6c6c8c;">Telegram ID</div>
-                        <div><?php echo h($u['tg_id']); ?></div>
-
-                        <div style="color:#6c6c8c;">Username</div>
-                        <div><?php echo $u['username'] ? '@'.h($u['username']) : '—'; ?></div>
-
-                        <div style="color:#6c6c8c;">Имя</div>
-                        <div><?php echo $u['first_name'] ? h($u['first_name']) : '—'; ?></div>
-
-                        <div style="color:#6c6c8c;">Фамилия</div>
-                        <div><?php echo $u['last_name'] ? h($u['last_name']) : '—'; ?></div>
-
-                        <div style="color:#6c6c8c;">Имя в профиле TG</div>
-                        <div><?php echo $u['name_telegram_profile'] ? h($u['name_telegram_profile']) : '—'; ?></div>
-
-                        <div style="color:#6c6c8c;">Язык Telegram</div>
-                        <div><?php echo $u['language_code'] ? h($u['language_code']) : '—'; ?></div>
-
-                        <div style="color:#6c6c8c;">Язык приложения</div>
-                        <div><?php echo $u['app_language'] ? h($u['app_language']) : '—'; ?></div>
-
-                        <div style="color:#6c6c8c;">Онбординг</div>
-                        <div><?php echo h($onboarding); ?></div>
-
-                        <div style="color:#6c6c8c;">Профиль в webapp</div>
-                        <div><?php echo h($webapp); ?></div>
-                    </div>
-                </div>
-
-                <div>
-                    <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:#ffffff;">Профиль</div>
-                    <div style="display:grid;grid-template-columns:140px 1fr;row-gap:6px;font-size:13px;">
-                        <div style="color:#6c6c8c;">Дата рождения</div>
-                        <div><?php echo h($fmtDate($u['birth_date'] ?? '')); ?></div>
-
-                        <div style="color:#6c6c8c;">Знак зодиака</div>
-                        <div><?php echo $u['zodiac_sign'] ? h($u['zodiac_sign']) : '—'; ?></div>
-
-                        <div style="color:#6c6c8c;">Пол</div>
-                        <div><?php echo $u['gender'] ? h($u['gender']) : '—'; ?></div>
-
-                        <div style="color:#6c6c8c;">Ищет</div>
-                        <div><?php echo $u['seeking_gender'] ? h($u['seeking_gender']) : '—'; ?></div>
-
-                        <div style="color:#6c6c8c;">Локация</div>
-                        <div><?php echo $u['location'] ? h($u['location']) : '—'; ?></div>
-
-                        <div style="color:#6c6c8c;">Тип семьи</div>
-                        <div><?php echo $u['family_type'] ? h($u['family_type']) : '—'; ?></div>
-
-                        <div style="color:#6c6c8c;">Тип семьи родителей</div>
-                        <div><?php echo $u['parents_family_type'] ? h($u['parents_family_type']) : '—'; ?></div>
-
-                        <div style="color:#6c6c8c;">Деятельность родителей</div>
-                        <div><?php echo $u['parents_main_activity'] ? h($u['parents_main_activity']) : '—'; ?></div>
-
-                        <div style="color:#6c6c8c;">Сфера партнёра</div>
-                        <div><?php echo $u['partner_activity_scope'] ? h($u['partner_activity_scope']) : '—'; ?></div>
-                    </div>
-                </div>
-            </div>
-
-            <?php if ($planInfo): ?>
-                <div style="margin-bottom:18px;padding:12px 14px;border-radius:10px;border:1px solid rgba(139,92,246,.4);background:rgba(15,23,42,.85);">
-                    <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:#ffffff;">
-                        <i class="fa-solid fa-crown" style="margin-right:6px;color:#facc15;"></i>Текущий тариф
-                    </div>
-                    <div style="font-size:13px;color:#b8b8d6;margin-bottom:4px;">
-                        <?php echo h($planInfo['plan_title'] ?? $planInfo['plan_code']); ?>
-                        <span style="opacity:.7;">(<?php echo h($planInfo['plan_code']); ?>)</span>
-                    </div>
-                    <div style="display:flex;flex-wrap:wrap;gap:10px;font-size:12px;color:#b8b8d6;">
-                        <span>Лимит в день: <strong><?php echo (int)($planInfo['plan_daily_limit'] ?? 0); ?></strong></span>
-                        <span>Использовано сегодня: <strong><?php echo (int)($planInfo['used_today'] ?? 0); ?></strong></span>
-                        <span>Осталось: <strong><?php echo (int)($planInfo['remaining_today'] ?? 0); ?></strong></span>
-                        <?php if (!empty($planInfo['last_reset_date'])): ?>
-                            <span>Последний сброс: <strong><?php echo h(date('d.m.Y', strtotime($planInfo['last_reset_date']))); ?></strong></span>
-                        <?php endif; ?>
-                    </div>
-                </div>
-            <?php endif; ?>
-
-            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;">
-                <div>
-                    <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:#ffffff;">Требования к партнёру</div>
-                    <?php if ($partnerReq): ?>
-                        <ul style="margin:0;padding-left:18px;font-size:13px;color:#b8b8d6;">
-                            <?php foreach ($partnerReq as $item): ?>
-                                <li><?php echo h(is_array($item) ? json_encode($item, JSON_UNESCAPED_UNICODE) : $item); ?></li>
-                            <?php endforeach; ?>
-                        </ul>
-                    <?php else: ?>
-                        <div style="font-size:13px;color:#6c6c8c;">Не заполнено</div>
-                    <?php endif; ?>
-                </div>
-
-                <div>
-                    <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:#ffffff;">Собственные качества</div>
-                    <?php if ($selfTraits): ?>
-                        <ul style="margin:0;padding-left:18px;font-size:13px;color:#b8b8d6;">
-                            <?php foreach ($selfTraits as $item): ?>
-                                <li><?php echo h(is_array($item) ? json_encode($item, JSON_UNESCAPED_UNICODE) : $item); ?></li>
-                            <?php endforeach; ?>
-                        </ul>
-                    <?php else: ?>
-                        <div style="font-size:13px;color:#6c6c8c;">Не заполнено</div>
-                    <?php endif; ?>
-                </div>
-            </div>
-
-            <div style="margin-top:18px;display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;font-size:13px;">
-                <div>
-                    <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:#ffffff;">Предпочтения в партнёре</div>
-                    <div style="color:#b8b8d6;white-space:pre-wrap;"><?php echo $u['partner_preferences'] ? h($u['partner_preferences']) : 'Не заполнено'; ?></div>
-                </div>
-                <div>
-                    <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:#ffffff;">Вредные привычки</div>
-                    <div style="color:#b8b8d6;white-space:pre-wrap;"><?php echo $u['bad_habits'] ? h($u['bad_habits']) : 'Не заполнено'; ?></div>
-                </div>
-                <div>
-                    <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:#ffffff;">Жизненные приоритеты</div>
-                    <div style="color:#b8b8d6;white-space:pre-wrap;"><?php echo $u['life_priorities'] ? h($u['life_priorities']) : 'Не заполнено'; ?></div>
                 </div>
             </div>
         </div>
@@ -372,6 +457,84 @@ if (isset($_POST['ajax']) && $_POST['ajax'] === 'user_details') {
         error_log('users.php user_details error: ' . $e->getMessage());
         echo '<div style="text-align:center;padding:40px;color:#ef4444;">Ошибка загрузки данных</div>';
     }
+    exit;
+}
+
+/* ---------- AJAX: обновление плана пользователя ---------- */
+if (isset($_POST['ajax']) && $_POST['ajax'] === 'update_plan') {
+    header('Content-Type: application/json; charset=utf-8');
+    $res = ['ok' => false, 'message' => 'Не удалось обновить подписку'];
+
+    $userId   = isset($_POST['user_id']) ? (int)$_POST['user_id'] : 0;
+    $planCode = isset($_POST['plan_code']) ? trim((string)$_POST['plan_code']) : '';
+
+    if ($userId <= 0 || $planCode === '') {
+        $res['message'] = 'Некорректные данные (user_id / plan_code)';
+        echo json_encode($res, JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    try {
+        // Проверяем, что план существует и активен
+        $st = $pdo->prepare("SELECT code, title, daily_limit FROM search_plans WHERE code = :c AND is_active = 1 LIMIT 1");
+        $st->execute([':c' => $planCode]);
+        $planRow = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$planRow) {
+            $res['message'] = 'Указанный тариф не найден или отключён';
+            echo json_encode($res, JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        // Берём tg_id пользователя
+        $st = $pdo->prepare("SELECT tg_id FROM users WHERE id = :id LIMIT 1");
+        $st->execute([':id' => $userId]);
+        $uRow = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$uRow || empty($uRow['tg_id'])) {
+            $res['message'] = 'Пользователь не найден или не задан tg_id';
+            echo json_encode($res, JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+
+        $tgId = $uRow['tg_id'];
+
+        // Вызываем процедуру sp_set_user_plan, которая создаёт/обновляет user_search_limits и сбрасывает счётчик
+        $call = $pdo->prepare("CALL sp_set_user_plan(:tg_id, :plan_code)");
+        $call->execute([
+            ':tg_id'     => $tgId,
+            ':plan_code' => $planCode,
+        ]);
+        while ($call->nextRowset()) {}
+
+        // Обновляем users.tariff_code (чтобы не расходилось с планами)
+        try {
+            $up = $pdo->prepare("UPDATE users SET tariff_code = :code WHERE tg_id = :tg LIMIT 1");
+            $up->execute([':code' => $planCode, ':tg' => $tgId]);
+        } catch (Throwable $e) {
+            error_log('users.php update users.tariff_code error: ' . $e->getMessage());
+        }
+
+        // Забираем актуальную инфу по плану из v_user_search_plans
+        $planInfo = null;
+        if (tableExists($pdo, 'v_user_search_plans')) {
+            $ps = $pdo->prepare("
+                SELECT plan_code, plan_title, plan_daily_limit, used_today, remaining_today, last_reset_date
+                FROM v_user_search_plans
+                WHERE tg_id = :tg
+                LIMIT 1
+            ");
+            $ps->execute([':tg' => $tgId]);
+            $planInfo = $ps->fetch(PDO::FETCH_ASSOC) ?: null;
+        }
+
+        $res['ok']             = true;
+        $res['message']        = 'Подписка успешно обновлена';
+        $res['html_plan_card'] = renderPlanCardHtml($planInfo);
+    } catch (Throwable $e) {
+        error_log('users.php update_plan error: ' . $e->getMessage());
+        $res['message'] = 'Ошибка при обновлении подписки';
+    }
+
+    echo json_encode($res, JSON_UNESCAPED_UNICODE);
     exit;
 }
 
@@ -460,11 +623,12 @@ $buildPageUrl = function(int $p) use ($base, $qs): string {
 
         body {
             font-family: 'Inter', sans-serif;
-            background: var(--bg-primary);
+            background: radial-gradient(circle at top, #1f2937 0, #020617 50%, #000 100%);
             color: var(--text-primary);
             line-height: 1.5;
             padding: 20px;
             min-height: 100vh;
+            animation: fadeIn .4s ease-out;
         }
 
         .container {
@@ -477,6 +641,7 @@ $buildPageUrl = function(int $p) use ($base, $qs): string {
             justify-content:space-between;
             align-items:flex-start;
             margin-bottom:24px;
+            animation: slideUp .4s ease-out;
         }
 
         .page-title h1 {
@@ -503,6 +668,8 @@ $buildPageUrl = function(int $p) use ($base, $qs): string {
             border:1px solid rgba(148,163,184,.4);
             font-size:12px;
             color:var(--text-secondary);
+            box-shadow:0 10px 30px rgba(0,0,0,.45);
+            backdrop-filter:blur(12px);
         }
         .admin-pill i{font-size:12px;}
 
@@ -541,7 +708,8 @@ $buildPageUrl = function(int $p) use ($base, $qs): string {
         }
         .btn-primary:hover{
             background:var(--accent-hover);
-            transform:translateY(-2px);
+            transform:translateY(-2px) scale(1.02);
+            box-shadow:0 14px 35px rgba(88,28,135,.8);
         }
         .btn-secondary{
             background:var(--bg-card);
@@ -554,7 +722,7 @@ $buildPageUrl = function(int $p) use ($base, $qs): string {
         }
 
         .filters{
-            background:var(--bg-card);
+            background:rgba(36,36,66,.95);
             border-radius:var(--radius-md);
             padding:16px 18px;
             margin-bottom:18px;
@@ -563,6 +731,8 @@ $buildPageUrl = function(int $p) use ($base, $qs): string {
             gap:14px;
             flex-wrap:wrap;
             align-items:flex-end;
+            box-shadow:0 14px 40px rgba(0,0,0,.55);
+            animation: slideUp .4s ease-out;
         }
         .filter-group{
             display:flex;
@@ -587,7 +757,8 @@ $buildPageUrl = function(int $p) use ($base, $qs): string {
         .form-input:focus{
             outline:none;
             border-color:var(--accent);
-            box-shadow:0 0 0 1px rgba(139,92,246,.5);
+            box-shadow:0 0 0 1px rgba(139,92,246,.5), 0 0 25px rgba(139,92,246,.35);
+            transform:translateY(-1px);
         }
 
         .users-grid{
@@ -604,19 +775,28 @@ $buildPageUrl = function(int $p) use ($base, $qs): string {
             position:relative;
             overflow:hidden;
             animation:slideUp .5s ease-out;
+            transition:transform .25s ease, box-shadow .25s ease, border-color .25s ease;
         }
         .user-card::before{
             content:'';
             position:absolute;
-            top:0;left:0;right:0;
+            top:0;left:-40%;right:-40%;
             height:3px;
             background:linear-gradient(90deg,var(--accent),#a855f7);
+            opacity:.8;
+            transform:translateX(-20%);
+            animation: shimmer 2.6s linear infinite;
         }
+        .user-card:hover{
+            transform:translateY(-6px) scale(1.01);
+            box-shadow:0 18px 40px rgba(0,0,0,.7);
+            border-color:rgba(139,92,246,.8);
+        }
+
         .user-header{
             display:flex;
             align-items:center;
             gap:12px;
-            margin-bottom:10px;
         }
         .user-avatar{
             width:46px;
@@ -631,10 +811,20 @@ $buildPageUrl = function(int $p) use ($base, $qs): string {
             font-size:18px;
             box-shadow:0 10px 25px rgba(0,0,0,.45);
             transition:var(--transition);
+            overflow:hidden;
+            animation:pulseGlow 2.8s ease-in-out infinite;
         }
         .user-avatar:hover{
-            transform:scale(1.08) rotate(4deg);
+            transform:scale(1.08) rotate(4deg) translateY(-1px);
         }
+        .user-avatar img{
+            width:100%;
+            height:100%;
+            object-fit:cover;
+            border-radius:inherit;
+            border:1px solid rgba(148,163,184,.5);
+        }
+
         .user-info{
             flex:1;
         }
@@ -666,6 +856,7 @@ $buildPageUrl = function(int $p) use ($base, $qs): string {
         .user-actions{
             display:flex;
             justify-content:flex-end;
+            margin-top:4px;
         }
 
         .empty-state{
@@ -673,6 +864,7 @@ $buildPageUrl = function(int $p) use ($base, $qs): string {
             padding:40px 20px;
             color:var(--text-muted);
             font-size:14px;
+            animation:fadeIn .4s ease-out;
         }
 
         .pagination{
@@ -720,9 +912,14 @@ $buildPageUrl = function(int $p) use ($base, $qs): string {
             justify-content:center;
             z-index:999;
             padding:16px;
+            opacity:0;
+            pointer-events:none;
+            transition:opacity .25s ease-out;
         }
         .modal-overlay.active{
             display:flex;
+            opacity:1;
+            pointer-events:auto;
         }
         .modal{
             background:var(--bg-card);
@@ -735,7 +932,7 @@ $buildPageUrl = function(int $p) use ($base, $qs): string {
             flex-direction:column;
             overflow:hidden;
             box-shadow:0 20px 50px rgba(0,0,0,.7);
-            animation:slideUp .35s ease-out;
+            animation:modalPop .35s ease-out;
         }
         .modal-header{
             padding:14px 18px;
@@ -765,7 +962,7 @@ $buildPageUrl = function(int $p) use ($base, $qs): string {
         .modal-close:hover{
             background:var(--bg-hover);
             color:#fff;
-            transform:rotate(6deg);
+            transform:rotate(6deg) scale(1.05);
         }
         .modal-body{
             flex:1;
@@ -773,9 +970,42 @@ $buildPageUrl = function(int $p) use ($base, $qs): string {
             padding:0;
         }
 
+        .tab-btn.active{
+            background:rgba(31,41,55,1);
+            color:#ffffff !important;
+            box-shadow:0 0 0 1px rgba(148,163,184,.7);
+        }
+        .tab-content{
+            margin-top:4px;
+            opacity:0;
+            transform:translateY(4px);
+            transition:opacity .18s ease-out, transform .18s ease-out;
+        }
+        .tab-content.active{
+            display:block !important;
+            opacity:1;
+            transform:translateY(0);
+        }
+
         @keyframes slideUp{
             from{opacity:0;transform:translateY(30px);}
             to{opacity:1;transform:translateY(0);}
+        }
+        @keyframes fadeIn{
+            from{opacity:0;}
+            to{opacity:1;}
+        }
+        @keyframes modalPop{
+            from{opacity:0;transform:translateY(26px) scale(.96);}
+            to{opacity:1;transform:translateY(0) scale(1);}
+        }
+        @keyframes shimmer{
+            0%{transform:translateX(-40%);}
+            100%{transform:translateX(40%);}
+        }
+        @keyframes pulseGlow{
+            0%,100%{box-shadow:0 10px 30px rgba(124,58,237,.55);}
+            50%{box-shadow:0 18px 40px rgba(124,58,237,.9);}
         }
 
         @media (max-width: 768px){
@@ -832,11 +1062,13 @@ $buildPageUrl = function(int $p) use ($base, $qs): string {
                     if ($displayName === '') {
                         $displayName = $u['name_telegram_profile'] ?: ($u['username'] ? '@'.$u['username'] : 'Пользователь');
                     }
-                    $initial = userInitial($displayName);
+                    $avatarUrl  = !empty($u['avatar_path']) ? $u['avatar_path'] : '/love/panel/assets/img/user.png';
                     ?>
                     <div class="user-card" data-user-id="<?php echo (int)$u['id']; ?>">
                         <div class="user-header">
-                            <div class="user-avatar"><?php echo h($initial); ?></div>
+                            <div class="user-avatar">
+                                <img src="<?php echo h($avatarUrl); ?>" alt="avatar">
+                            </div>
                             <div class="user-info">
                                 <div class="user-name"><?php echo h($displayName); ?></div>
                                 <div class="user-meta">
@@ -930,7 +1162,7 @@ $buildPageUrl = function(int $p) use ($base, $qs): string {
     </div>
 
     <script>
-        const searchInput   = document.getElementById('searchInput');
+        const searchInput    = document.getElementById('searchInput');
         const btnClearSearch = document.getElementById('btnClearSearch');
 
         function applySearch() {
@@ -977,6 +1209,10 @@ $buildPageUrl = function(int $p) use ($base, $qs): string {
 
         function closeUserModal() {
             modal.classList.remove('active');
+            setTimeout(() => {
+                const body = document.getElementById('userModalBody');
+                if (body) body.scrollTop = 0;
+            }, 200);
         }
 
         modalClose.addEventListener('click', closeUserModal);
@@ -985,6 +1221,75 @@ $buildPageUrl = function(int $p) use ($base, $qs): string {
         });
         document.addEventListener('keydown', function(e){
             if (e.key === 'Escape') closeUserModal();
+        });
+
+        // Делегирование событий внутри модалки (табы + сохранение подписки)
+        modalBody.addEventListener('click', function(e){
+            const tabBtn = e.target.closest('.tab-btn');
+            if (tabBtn) {
+                const tab = tabBtn.getAttribute('data-tab');
+                const wrapper = modalBody.querySelector('.user-details-modal');
+                if (!wrapper) return;
+
+                const allTabBtns = modalBody.querySelectorAll('.tab-btn');
+                allTabBtns.forEach(function(b){ b.classList.remove('active'); });
+                tabBtn.classList.add('active');
+
+                const info = modalBody.querySelector('.tab-content-info');
+                const sub  = modalBody.querySelector('.tab-content-subscription');
+                if (info && sub) {
+                    if (tab === 'info') {
+                        info.classList.add('active');
+                        sub.classList.remove('active');
+                        sub.style.display = 'none';
+                        info.style.display = 'block';
+                    } else {
+                        sub.classList.add('active');
+                        info.classList.remove('active');
+                        info.style.display = 'none';
+                        sub.style.display = 'block';
+                    }
+                }
+                return;
+            }
+
+            const saveBtn = e.target.closest('#savePlanBtn');
+            if (saveBtn) {
+                const wrapper = modalBody.querySelector('.user-details-modal');
+                if (!wrapper) return;
+                const userId = wrapper.getAttribute('data-user-id');
+                const select = modalBody.querySelector('#planSelect');
+                if (!userId || !select) return;
+
+                const planCode = select.value;
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', 'users.php', true);
+                xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded; charset=UTF-8');
+                xhr.onreadystatechange = function(){
+                    if (xhr.readyState === 4) {
+                        let msg = 'Ошибка сохранения';
+                        let res = null;
+                        try {
+                            res = JSON.parse(xhr.responseText);
+                        } catch (err) {
+                            res = null;
+                        }
+                        if (xhr.status === 200 && res) {
+                            if (res.message) msg = res.message;
+                            if (res.ok && res.html_plan_card) {
+                                const cont = modalBody.querySelector('.subscription-current');
+                                if (cont) cont.innerHTML = res.html_plan_card;
+                            }
+                        }
+                        alert(msg);
+                    }
+                };
+                xhr.send(
+                    'ajax=update_plan'
+                    + '&user_id=' + encodeURIComponent(userId)
+                    + '&plan_code=' + encodeURIComponent(planCode)
+                );
+            }
         });
     </script>
 </body>

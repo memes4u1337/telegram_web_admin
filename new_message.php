@@ -1,4 +1,5 @@
 <?php
+// new_message.php — создание и список объявлений (панель админа)
 
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
@@ -20,7 +21,7 @@ function loadEnv($path) {
 }
 loadEnv(__DIR__ . '/.env');
 
-/* ---------- PDO из .env---------- */
+/* ---------- PDO из .env ---------- */
 function db(): PDO {
     static $pdo = null;
     if ($pdo) return $pdo;
@@ -49,11 +50,128 @@ function h($s) {
     return htmlspecialchars((string)$s, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
 }
 
-/* ---------- строгая проверка ADMIN через сессию + таблицу admins ---------- */
+/**
+ * Фолбэк-перевод через MyMemory (RU → EN / RU → ES)
+ */
+function translateTextMyMemory(string $text, string $targetLang, string $sourceLang = 'ru'): string {
+    $text = trim($text);
+    if ($text === '') return '';
 
+    $url = 'https://api.mymemory.translated.net/get?q='
+        . urlencode($text)
+        . '&langpair=' . urlencode($sourceLang . '|' . $targetLang);
+
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 12,
+    ]);
+    $response = curl_exec($ch);
+    if ($response === false) {
+        curl_close($ch);
+        return '';
+    }
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($code !== 200) return '';
+
+    $data = json_decode($response, true);
+    if (!isset($data['responseData']['translatedText'])) return '';
+
+    $translated = html_entity_decode($data['responseData']['translatedText'], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+
+    if (trim(mb_strtolower($translated, 'UTF-8')) === trim(mb_strtolower($text, 'UTF-8'))) {
+        return '';
+    }
+
+    return $translated;
+}
+
+/**
+ * Более точный перевод RU → EN / ES:
+ *  - запрашиваем LibreTranslate и MyMemory
+ *  - выбираем лучший вариант по простым эвристикам (не пустой, не совпадает с исходником, более информативный)
+ */
+function translateText(string $text, string $targetLang, string $sourceLang = 'ru'): string {
+    $text = trim($text);
+    if ($text === '') return '';
+
+    $lcSource = trim(mb_strtolower($text, 'UTF-8'));
+
+    $candidateLt = '';
+    $candidateMm = '';
+
+    // 1) LibreTranslate
+    $ltUrl = 'https://libretranslate.de/translate';
+    $payload = http_build_query([
+        'q'      => $text,
+        'source' => $sourceLang,
+        'target' => $targetLang,
+        'format' => 'text',
+    ]);
+
+    $ch = curl_init($ltUrl);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 12,
+        CURLOPT_POST           => true,
+        CURLOPT_HTTPHEADER     => ['Content-Type: application/x-www-form-urlencoded'],
+        CURLOPT_POSTFIELDS     => $payload,
+    ]);
+    $response = curl_exec($ch);
+
+    if ($response !== false) {
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($code === 200) {
+            $data = json_decode($response, true);
+            if (isset($data['translatedText'])) {
+                $tmp = trim((string)$data['translatedText']);
+                if ($tmp !== '' && trim(mb_strtolower($tmp, 'UTF-8')) !== $lcSource) {
+                    $candidateLt = $tmp;
+                }
+            }
+        }
+    } else {
+        curl_close($ch);
+    }
+
+    // 2) MyMemory
+    $candidateMm = translateTextMyMemory($text, $targetLang, $sourceLang);
+
+    // 3) Выбор лучшего
+    if ($candidateLt === '' && $candidateMm === '') {
+        return '';
+    }
+
+    if ($candidateLt !== '' && $candidateMm === '') {
+        return $candidateLt;
+    }
+    if ($candidateMm !== '' && $candidateLt === '') {
+        return $candidateMm;
+    }
+
+    // Оба есть — берём более «информативный»:
+    //   - не короче исходника
+    //   - немного длиннее конкурента
+    $lenLt = mb_strlen($candidateLt, 'UTF-8');
+    $lenMm = mb_strlen($candidateMm, 'UTF-8');
+    $lenSrc = mb_strlen($text, 'UTF-8');
+
+    $scoreLt = $lenLt;
+    $scoreMm = $lenMm;
+
+    if ($lenLt < (int)($lenSrc * 0.6)) $scoreLt -= 10;
+    if ($lenMm < (int)($lenSrc * 0.6)) $scoreMm -= 10;
+
+    return ($scoreLt >= $scoreMm) ? $candidateLt : $candidateMm;
+}
+
+/* ---------- строгая проверка ADMIN через сессию + таблицу admins ---------- */
 $LOGIN_URL = '/login.php';
 
-// в сессии ожидаем такие же ключи, как в setting_bot.php
 if (empty($_SESSION['admin_id']) || empty($_SESSION['admin_role'])) {
     header('Location: ' . $LOGIN_URL);
     exit;
@@ -64,11 +182,9 @@ $userRole  = (string)$_SESSION['admin_role'];
 $username  = (string)($_SESSION['admin_name']  ?? '');
 $userEmail = (string)($_SESSION['admin_email'] ?? '');
 
-// роли, которым разрешён доступ к разделу объявлений
 $ALLOWED_ROLES = ['owner', 'admin', 'manager'];
 
 if (!in_array($userRole, $ALLOWED_ROLES, true)) {
-    // сразу вычищаем сессию и кидаем на логин
     $_SESSION = [];
     session_destroy();
     header('Location: ' . $LOGIN_URL);
@@ -78,10 +194,10 @@ if (!in_array($userRole, $ALLOWED_ROLES, true)) {
 /* ---------- БД ---------- */
 $pdo = db();
 
-/* ---------- проверка, что такой админ есть в БД и активен ---------- */
+/* ---------- проверка админа в БД и user_id для created_by ---------- */
 
 $adminRow = [
-    'user_id'   => null,      //id пользователя из таблицы users
+    'user_id'   => null,
     'name'      => $username,
     'email'     => $userEmail,
     'role'      => $userRole,
@@ -89,7 +205,7 @@ $adminRow = [
 ];
 
 $adminExists    = false;
-$ADMIN_USER_ID  = 0; // это users.id, нужен для announcements.created_by
+$ADMIN_USER_ID  = 0; // users.id, нужен для announcements.created_by
 
 try {
     $st = $pdo->prepare("
@@ -103,13 +219,12 @@ try {
         $adminRow      = array_merge($adminRow, $row);
         $adminExists   = ((int)$row['is_active'] === 1);
         $userRole      = (string)$row['role'];
-        $ADMIN_USER_ID = (int)$row['user_id']; // вот тут получили users.id
+        $ADMIN_USER_ID = (int)$row['user_id'];
     }
 } catch (Throwable $e) {
     error_log('new_message.php admin fetch error: ' . $e->getMessage());
 }
 
-// если админ не найден или деактивирован — выкидываем
 if (!$adminExists || (int)$adminRow['is_active'] !== 1) {
     $_SESSION = [];
     if (session_id() !== '') {
@@ -121,18 +236,48 @@ if (!$adminExists || (int)$adminRow['is_active'] !== 1) {
 
 $adminDisplay = $adminRow['name'] ?: $adminRow['email'];
 
-/* ---------- статус подключения к БД---------- */
+/* ---------- AJAX: перевод RU → EN и RU → ES ---------- */
+if (isset($_POST['ajax']) && $_POST['ajax'] === 'translate') {
+    header('Content-Type: application/json; charset=utf-8');
+    $textRu = trim($_POST['text_ru'] ?? '');
+    if ($textRu === '') {
+        echo json_encode(['ok' => false, 'error' => 'empty_text'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
 
-$dbStatusOk         = false;
-$dbStatusMessage    = '';
-$successMessage     = '';
-$errorMessage       = '';
-$oldContent         = '';
-$totalAnnouncements = 0;
-$pages              = 1;
-$page               = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
-$pageSize           = 10;
-$announcements      = [];
+    try {
+        $en = translateText($textRu, 'en', 'ru');
+        $es = translateText($textRu, 'es', 'ru');
+
+        echo json_encode([
+            'ok' => true,
+            'en' => $en,
+            'es' => $es,
+        ], JSON_UNESCAPED_UNICODE);
+    } catch (Throwable $e) {
+        error_log('new_message.php translate error: ' . $e->getMessage());
+        echo json_encode([
+            'ok'    => false,
+            'error' => 'translate_failed',
+        ], JSON_UNESCAPED_UNICODE);
+    }
+    exit;
+}
+
+/* ---------- статус подключения к БД ---------- */
+
+$dbStatusOk          = false;
+$dbStatusMessage     = '';
+$successMessage      = '';
+$errorMessage        = '';
+$oldContentRu        = '';
+$oldContentEn        = '';
+$oldContentEs        = '';
+$totalAnnouncements  = 0;
+$pages               = 1;
+$page                = isset($_GET['page']) ? max(1, (int)$_GET['page']) : 1;
+$pageSize            = 10;
+$announcements       = [];
 
 try {
     $pdo->query('SELECT 1');
@@ -143,33 +288,42 @@ try {
     $dbStatusMessage = 'Ошибка подключения к БД: ' . $e->getMessage();
 }
 
-/* ---------- Обработка отправки объявления (только если БД ок) ---------- */
+/* ---------- Обработка отправки объявления (RU + EN + ES) ---------- */
 
-if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST') {
-    $content    = trim($_POST['content'] ?? '');
-    $oldContent = $content;
+if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'])) {
+    $contentRu = trim($_POST['content_ru'] ?? '');
+    $contentEn = trim($_POST['content_en'] ?? '');
+    $contentEs = trim($_POST['content_es'] ?? '');
 
-    if ($content === '') {
-        $errorMessage = 'Введите текст объявления.';
+    $oldContentRu = $contentRu;
+    $oldContentEn = $contentEn;
+    $oldContentEs = $contentEs;
+
+    if ($contentRu === '') {
+        $errorMessage = 'Введите текст объявления на русском.';
     } else {
-        try {
+        if ($contentEn === '') $contentEn = $contentRu;
+        if ($contentEs === '') $contentEs = $contentRu;
 
+        try {
             $stmt = $pdo->prepare("
-                INSERT INTO announcements (content, created_by, created_at)
-                VALUES (:content, :created_by, NOW())
+                INSERT INTO announcements (content, content_ru, content_en, content_es, created_by, created_at)
+                VALUES (:content, :content_ru, :content_en, :content_es, :created_by, NOW())
             ");
             $stmt->execute([
-                ':content'    => $content,
-                ':created_by' => $ADMIN_USER_ID ?: null, // если вдруг нет связи с users — пишем NULL
+                ':content'    => $contentRu,
+                ':content_ru' => $contentRu,
+                ':content_en' => $contentEn,
+                ':content_es' => $contentEs,
+                ':created_by' => $ADMIN_USER_ID ?: null,
             ]);
 
-            // PRG — чтобы не дублировать объявление по F5
             if (!headers_sent()) {
                 header('Location: new_message.php?success=1');
                 exit;
             } else {
                 $successMessage = 'Объявление успешно добавлено.';
-                $oldContent     = '';
+                $oldContentRu = $oldContentEn = $oldContentEs = '';
             }
         } catch (Throwable $e) {
             error_log('new_message.php insert announcement error: ' . $e->getMessage());
@@ -182,7 +336,7 @@ if ($dbStatusOk && isset($_GET['success']) && $_GET['success'] == '1') {
     $successMessage = 'Объявление успешно добавлено.';
 }
 
-/* ---------- Получение объявлений + пагинация (если БД доступна) ---------- */
+/* ---------- Получение объявлений + пагинация ---------- */
 
 if ($dbStatusOk) {
     try {
@@ -190,18 +344,15 @@ if ($dbStatusOk) {
         $totalAnnouncements = (int)$pdo->query($countSql)->fetchColumn();
         $pages              = max(1, (int)ceil($totalAnnouncements / $pageSize));
 
-        if ($page > $pages) {
-            $page = $pages;
-        }
+        if ($page > $pages) $page = $pages;
         $offset = ($page - 1) * $pageSize;
 
-        /**
-         * created_by ссылается на users.id
-         * Для отображения автора тянем username/first_name/last_name из таблицы users.
-         */
         $listSql = "
             SELECT a.id,
                    a.content,
+                   a.content_ru,
+                   a.content_en,
+                   a.content_es,
                    a.created_by,
                    a.created_at,
                    u.username,
@@ -226,7 +377,6 @@ if ($dbStatusOk) {
 /* ---------- форматирование имени автора ---------- */
 
 function formatAuthor(array $row): string {
-    // Пробуем собрать нормальное имя пользователя
     $fullName = trim(($row['first_name'] ?? '') . ' ' . ($row['last_name'] ?? ''));
     if ($fullName !== '') {
         return $fullName;
@@ -298,7 +448,6 @@ function formatAuthor(array $row): string {
             max-width: 1200px;
             margin: 0 auto;
         }
-
 
         .header {
             display: flex;
@@ -384,8 +533,6 @@ function formatAuthor(array $row): string {
             transform: translateY(-1px);
         }
 
-        /* ---------- cards / layout ---------- */
-
         .layout {
             display: grid;
             grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
@@ -433,8 +580,6 @@ function formatAuthor(array $row): string {
             color: var(--text-secondary);
             margin-bottom: 16px;
         }
-
-        /* ---------- статус БД ---------- */
 
         .status-chip {
             display: inline-flex;
@@ -503,23 +648,36 @@ function formatAuthor(array $row): string {
             color: var(--danger);
         }
 
-        /* ---------- форма объявления ---------- */
-
         .form-group {
             margin-bottom: 16px;
         }
 
         .form-label {
-            display: block;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
             font-size: 13px;
             color: var(--text-secondary);
-            margin-bottom: 6px;
             font-weight: 500;
+        }
+
+        .form-label .required {
+            color: var(--danger);
+            margin-left: 4px;
+        }
+
+        .lang-tag {
+            font-size: 11px;
+            padding: 2px 7px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
         }
 
         .form-textarea {
             width: 100%;
-            min-height: 180px;
+            min-height: 110px;
             resize: vertical;
             padding: 12px 14px;
             background: var(--bg-secondary);
@@ -534,7 +692,7 @@ function formatAuthor(array $row): string {
         .form-textarea:focus {
             outline: none;
             border-color: var(--accent);
-            box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.2);
+            box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.15);
         }
 
         .form-hint {
@@ -557,7 +715,14 @@ function formatAuthor(array $row): string {
             color: var(--text-muted);
         }
 
-        /* ---------- список объявлений ---------- */
+        .translate-status {
+            font-size: 12px;
+            color: var(--text-muted);
+            display:flex;
+            align-items:center;
+            gap:6px;
+        }
+        .translate-status i{font-size:12px;}
 
         .ann-list-wrapper {
             max-height: 540px;
@@ -579,6 +744,7 @@ function formatAuthor(array $row): string {
             padding: 12px 14px;
             margin-bottom: 10px;
             transition: var(--transition);
+            font-size:13px;
         }
 
         .ann-item:hover {
@@ -605,14 +771,22 @@ function formatAuthor(array $row): string {
             opacity: 0.85;
         }
 
+        .ann-lang-block{
+            margin-top:4px;
+            padding-top:4px;
+            border-top:1px dashed rgba(148,163,184,.4);
+        }
+        .ann-lang-label{
+            font-size:11px;
+            color:var(--text-muted);
+            margin-bottom:2px;
+        }
         .ann-content {
             font-size: 14px;
             color: var(--text-primary);
             white-space: pre-wrap;
             word-wrap: break-word;
         }
-
-        /* ---------- пагинация ---------- */
 
         .pagination {
             display: flex;
@@ -666,7 +840,6 @@ function formatAuthor(array $row): string {
             100% { transform: scale(1.2); opacity: 0; }
         }
 
-        /* ---------- адаптив ---------- */
         @media (max-width: 900px) {
             .layout {
                 grid-template-columns: 1fr;
@@ -704,9 +877,7 @@ function formatAuthor(array $row): string {
         </div>
     </div>
 
-    <!-- сетка: слева форма, справа список -->
     <div class="layout">
-        <!-- Левая колонка: создание объявления -->
         <div>
             <div class="card">
                 <div class="card-header">
@@ -723,7 +894,7 @@ function formatAuthor(array $row): string {
                 </div>
                 <div class="card-body">
                     <div class="card-subtitle">
-                        Напишите текст объявления — оно появится в общем списке для всех, у кого есть доступ к этому разделу.
+                        Пишешь объявление на русском — английский и испанский переводятся автоматически по двум сервисам, берётся более точный вариант.
                     </div>
 
                     <?php if (!$dbStatusOk): ?>
@@ -749,22 +920,60 @@ function formatAuthor(array $row): string {
 
                     <form method="post" action="new_message.php" onsubmit="return handleSubmitAnnouncement(this);">
                         <div class="form-group">
-                            <label class="form-label" for="content">Текст объявления</label>
+                            <label class="form-label" for="content_ru">
+                                <span>Текст на русском <span class="required">*</span></span>
+                                <span class="lang-tag">Русский · ru</span>
+                            </label>
                             <textarea
-                                id="content"
-                                name="content"
+                                id="content_ru"
+                                name="content_ru"
                                 class="form-textarea"
-                                placeholder="Напишите здесь текст объявления..."
+                                placeholder="Введите текст объявления на русском..."
                                 oninput="updateCharCounter(this)"
                                 <?= $dbStatusOk ? '' : 'disabled' ?>
-                            ><?= h($oldContent) ?></textarea>
+                            ><?= h($oldContentRu) ?></textarea>
                             <div class="form-hint">
-                                Можно использовать переносы строк. Объявление увидят все пользователи панели, которым открыт этот раздел.
+                                На основе этого текста строятся английская и испанская версии.
                             </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="form-label" for="content_en">
+                                <span>Текст на английском</span>
+                                <span class="lang-tag">English · en</span>
+                            </label>
+                            <textarea
+                                id="content_en"
+                                name="content_en"
+                                class="form-textarea"
+                                placeholder="Английская версия появится автоматически..."
+                                <?= $dbStatusOk ? '' : 'disabled' ?>
+                            ><?= h($oldContentEn) ?></textarea>
+                            <div class="form-hint">Авто-перевод можно поправить вручную перед сохранением.</div>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="form-label" for="content_es">
+                                <span>Текст на испанском</span>
+                                <span class="lang-tag">Español · es</span>
+                            </label>
+                            <textarea
+                                id="content_es"
+                                name="content_es"
+                                class="form-textarea"
+                                placeholder="Испанская версия появится автоматически..."
+                                <?= $dbStatusOk ? '' : 'disabled' ?>
+                            ><?= h($oldContentEs) ?></textarea>
+                            <div class="form-hint">Тоже доступна ручная правка.</div>
                         </div>
 
                         <div class="form-footer">
                             <div class="char-counter" id="charCounter">0 символов</div>
+                            <div class="translate-status" id="translateStatus">
+                                <i class="fa-regular fa-circle-check"></i>
+                                <i class="fa-solid fa-spinner fa-spin" style="display:none;"></i>
+                                <span>Авто-перевод включён</span>
+                            </div>
                             <button type="submit" class="btn btn-primary" <?= $dbStatusOk ? '' : 'disabled' ?>>
                                 <i class="fas fa-paper-plane"></i>
                                 <span>Отправить</span>
@@ -775,7 +984,6 @@ function formatAuthor(array $row): string {
             </div>
         </div>
 
-        <!-- Правая колонка: список объявлений -->
         <div>
             <div class="card">
                 <div class="card-header">
@@ -786,7 +994,7 @@ function formatAuthor(array $row): string {
                 </div>
                 <div class="card-body">
                     <div class="card-subtitle">
-                        Последние объявления отображаются первыми.
+                        В боте пользователь увидит только одну версию объявления — в зависимости от языка, выбранного при регистрации.
                     </div>
 
                     <div class="ann-list-wrapper">
@@ -813,9 +1021,31 @@ function formatAuthor(array $row): string {
                                             <?= h(date('d.m.Y H:i', strtotime($ann['created_at']))) ?>
                                         </span>
                                     </div>
-                                    <div class="ann-content">
-                                        <?= nl2br(h($ann['content'])) ?>
-                                    </div>
+
+                                    <?php
+                                    $ru = $ann['content_ru'] ?? '';
+                                    if ($ru === '') $ru = $ann['content'] ?? '';
+                                    if ($ru !== ''):
+                                    ?>
+                                        <div class="ann-lang-block">
+                                            <div class="ann-lang-label">Русский</div>
+                                            <div class="ann-content"><?= nl2br(h($ru)) ?></div>
+                                        </div>
+                                    <?php endif; ?>
+
+                                    <?php if (!empty($ann['content_en'])): ?>
+                                        <div class="ann-lang-block">
+                                            <div class="ann-lang-label">English</div>
+                                            <div class="ann-content"><?= nl2br(h($ann['content_en'])) ?></div>
+                                        </div>
+                                    <?php endif; ?>
+
+                                    <?php if (!empty($ann['content_es'])): ?>
+                                        <div class="ann-lang-block">
+                                            <div class="ann-lang-label">Español</div>
+                                            <div class="ann-content"><?= nl2br(h($ann['content_es'])) ?></div>
+                                        </div>
+                                    <?php endif; ?>
                                 </div>
                             <?php endforeach; ?>
                         <?php endif; ?>
@@ -885,19 +1115,113 @@ function formatAuthor(array $row): string {
     }
 
     function handleSubmitAnnouncement(form) {
-        const textarea = form.querySelector('#content');
+        const textarea = form.querySelector('#content_ru');
         if (!textarea || textarea.disabled) return false;
         const value = textarea.value.trim();
         if (!value) {
-            alert('Введите текст объявления.');
+            alert('Введите текст объявления на русском.');
             textarea.focus();
             return false;
         }
         return true;
     }
 
+    (function() {
+        const ru = document.getElementById('content_ru');
+        const en = document.getElementById('content_en');
+        const es = document.getElementById('content_es');
+        const status = document.getElementById('translateStatus');
+        if (!ru || !en || !es || !status) return;
+
+        const icons = status.querySelectorAll('i');
+        const iconOk   = icons[0];
+        const iconSpin = icons[1];
+        const statusText = status.querySelector('span');
+
+        let timer = null;
+        let lastSentText = '';
+
+        function setIdle() {
+            iconSpin.style.display = 'none';
+            iconOk.style.display   = 'inline-block';
+            statusText.textContent = 'Авто-перевод включён';
+        }
+
+        function setTranslating() {
+            iconOk.style.display   = 'none';
+            iconSpin.style.display = 'inline-block';
+            statusText.textContent = 'Переводим...';
+        }
+
+        function setError() {
+            iconOk.style.display   = 'none';
+            iconSpin.style.display = 'none';
+            statusText.textContent = 'Ошибка перевода, можно править вручную';
+        }
+
+        setIdle();
+
+        ru.addEventListener('input', function() {
+            const text = ru.value.trim();
+
+            updateCharCounter(ru);
+
+            if (!text) {
+                clearTimeout(timer);
+                en.value = '';
+                es.value = '';
+                setIdle();
+                return;
+            }
+
+            if (text === lastSentText) return;
+
+            clearTimeout(timer);
+            setTranslating();
+
+            timer = setTimeout(function() {
+                lastSentText = text;
+
+                const body = new URLSearchParams();
+                body.append('ajax', 'translate');
+                body.append('text_ru', text);
+
+                fetch('new_message.php', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+                    },
+                    body: body.toString()
+                })
+                    .then(resp => resp.json())
+                    .then(data => {
+                        if (data.ok) {
+                            let any = false;
+
+                            if (typeof data.en === 'string' && data.en.trim() !== '') {
+                                en.value = data.en;
+                                any = true;
+                            }
+                            if (typeof data.es === 'string' && data.es.trim() !== '') {
+                                es.value = data.es;
+                                any = true;
+                            }
+
+                            if (any) setIdle(); else setError();
+                        } else {
+                            setError();
+                        }
+                    })
+                    .catch(err => {
+                        console.error(err);
+                        setError();
+                    });
+            }, 600);
+        });
+    })();
+
     document.addEventListener('DOMContentLoaded', function () {
-        const textarea = document.getElementById('content');
+        const textarea = document.getElementById('content_ru');
         if (textarea) {
             updateCharCounter(textarea);
         }

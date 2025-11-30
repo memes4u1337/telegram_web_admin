@@ -1,5 +1,5 @@
 <?php
-// new_tariffs.php — управление тарифами поиска (таблица search_plans)
+// new_limit.php — управление лимитами поиска (таблица search_limits)
 
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
@@ -68,7 +68,6 @@ if (!function_exists('ru_plural')) {
 /**
  * Фолбэк-перевод через MyMemory
  * ВСЕГДА RU → EN или RU → ES, в зависимости от $targetLang
- * Взято из start_bot.php
  */
 function translateTextMyMemory(string $text, string $targetLang, string $sourceLang = 'ru'): string {
     $text = trim($text);
@@ -107,7 +106,6 @@ function translateTextMyMemory(string $text, string $targetLang, string $sourceL
 
 /**
  * Основной перевод: сначала LibreTranslate (RU → EN / RU → ES), потом MyMemory
- * Взято из start_bot.php
  */
 function translateText(string $text, string $targetLang, string $sourceLang = 'ru'): string {
     $text = trim($text);
@@ -155,20 +153,19 @@ function translateText(string $text, string $targetLang, string $sourceLang = 'r
 }
 
 /**
- * Генерация "базы" кода тарифа из названия
- * (тот же slug, что и при сохранении, чтобы в превью всё совпадало)
+ * Генерация "базы" кода лимита из названия
  */
-function generatePlanCodeBase(string $title): string {
+function generateLimitCodeBase(string $title): string {
     $base = strtolower($title);
     $base = preg_replace('/[^a-z0-9]+/', '_', $base);
     $base = trim($base, '_');
     if ($base === '') {
-        $base = 'plan';
+        $base = 'limit';
     }
     return $base;
 }
 
-/* ---------- строгая проверка ADMIN как в setting_bot.php ---------- */
+/* ---------- строгая проверка ADMIN ---------- */
 $LOGIN_URL = '/login.php';
 
 // проверяем сессию админа
@@ -218,7 +215,7 @@ try {
         $userRole = (string)$adminRow['role'];
     }
 } catch (Throwable $e) {
-    error_log('new_tariffs.php admin fetch error: ' . $e->getMessage());
+    error_log('new_limit.php admin fetch error: ' . $e->getMessage());
 }
 
 if (!$adminExists || (int)$adminRow['is_active'] !== 1) {
@@ -250,13 +247,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax']) && $dbStatusO
     header('Content-Type: application/json; charset=utf-8');
     $ajax = $_POST['ajax'];
 
-    // AJAX: проверка названия тарифа (латиница + уникальность)
+    // AJAX: проверка названия лимита (латиница + уникальность)
     if ($ajax === 'check_title') {
         $title = trim($_POST['title'] ?? '');
         $errors = [];
 
         if ($title === '') {
-            $errors[] = 'Введите название тарифа.';
+            $errors[] = 'Введите название лимита.';
         } elseif (preg_match('/[А-Яа-яЁё]/u', $title)) {
             $errors[] = 'Название только на английском (латиница, без кириллицы).';
         } elseif (!preg_match('/^[A-Za-z0-9 _\-\.\(\)]+$/', $title)) {
@@ -271,23 +268,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax']) && $dbStatusO
         if (empty($errors)) {
             // проверка по title
             try {
-                $st = $pdo->prepare("SELECT 1 FROM search_plans WHERE title = :t LIMIT 1");
+                $st = $pdo->prepare("SELECT 1 FROM search_limits WHERE title = :t LIMIT 1");
                 $st->execute([':t' => $title]);
                 if ($st->fetch()) {
                     $existsByTitle = true;
                     $is_unique = false;
-                    $errors[] = 'Тариф с таким названием уже существует.';
+                    $errors[] = 'Лимит с таким названием уже существует.';
                 }
             } catch (Throwable $e) {
                 $errors[] = 'Ошибка проверки названия: ' . $e->getMessage();
             }
 
-            // превью кода тарифа (как будет сохранён)
-            $base = generatePlanCodeBase($title);
+            // превью кода лимита (как будет сохранён)
+            $base = generateLimitCodeBase($title);
             $code = $base;
             $suffix = 1;
             try {
-                $check = $pdo->prepare("SELECT 1 FROM search_plans WHERE code = :c LIMIT 1");
+                $check = $pdo->prepare("SELECT 1 FROM search_limits WHERE code = :c LIMIT 1");
                 while (true) {
                     $check->execute([':c' => $code]);
                     if (!$check->fetch()) {
@@ -313,7 +310,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax']) && $dbStatusO
         exit;
     }
 
-    // AJAX: перевод описания тарифа RU → EN и RU → ES
+    // AJAX: перевод описания лимита RU → EN и RU → ES
     if ($ajax === 'translate_description') {
         $textRu = trim($_POST['text_ru'] ?? '');
         if ($textRu === '') {
@@ -349,18 +346,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax']) && $dbStatusO
     exit;
 }
 
-/* ---------- обработка формы создания тарифа ---------- */
+/* ---------- обработка формы создания лимита ---------- */
 $errors  = [];
 $success = '';
 
-$title         = '';
-$description   = ''; // русская версия (основная)
-$descriptionEn = '';
-$descriptionEs = '';
-$priceRaw      = '';
-$durationValue = 30;
-$durationUnit  = 'days';
-$dailyLimit    = 10; // дефолтный лимит
+$title           = '';
+$description     = ''; // русская версия (основная)
+$descriptionEn   = '';
+$descriptionEs   = '';
+$priceRaw        = '';
+$searchLimit     = 10; // сколько успешных поисков за 1 день (дефолт)
+$durationDays    = 1;  // ВСЕГДА 1 день
 
 if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'])) {
     $title         = trim($_POST['title'] ?? '');
@@ -368,13 +364,11 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
     $descriptionEn = trim($_POST['description_en'] ?? '');   // EN (черновик / ручной)
     $descriptionEs = trim($_POST['description_es'] ?? '');   // ES (черновик / ручной)
     $priceRaw      = trim($_POST['price'] ?? '');
-    $durationValue = (int)($_POST['duration_value'] ?? 0);
-    $durationUnit  = $_POST['duration_unit'] ?? 'days';
-    $dailyLimit    = (int)($_POST['daily_limit'] ?? 0);
+    $searchLimit   = (int)($_POST['search_limit'] ?? 0);
 
     // Валидация: название только латиница / цифры / пробелы / - _ . ( )
     if ($title === '') {
-        $errors[] = 'Введите название тарифа.';
+        $errors[] = 'Введите название лимита.';
     } elseif (preg_match('/[А-Яа-яЁё]/u', $title)) {
         $errors[] = 'Название только на английском (латиница, без кириллицы).';
     } elseif (!preg_match('/^[A-Za-z0-9 _\-\.\(\)]+$/', $title)) {
@@ -390,25 +384,17 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
         }
     }
 
-    if ($durationValue <= 0) {
-        $errors[] = 'Укажите длительность тарифа.';
-    }
-
-    if ($durationUnit !== 'days' && $durationUnit !== 'months') {
-        $durationUnit = 'days';
-    }
-
-    if ($dailyLimit < 0) {
-        $errors[] = 'Лимит в сутки не может быть меньше нуля.';
+    if ($searchLimit <= 0) {
+        $errors[] = 'Укажите количество успешных поисков (минимум 1).';
     }
 
     // Дополнительная проверка уникальности названия в БД
     if ($title !== '') {
         try {
-            $st = $pdo->prepare("SELECT 1 FROM search_plans WHERE title = :t LIMIT 1");
+            $st = $pdo->prepare("SELECT 1 FROM search_limits WHERE title = :t LIMIT 1");
             $st->execute([':t' => $title]);
             if ($st->fetch()) {
-                $errors[] = 'Тариф с таким названием уже существует.';
+                $errors[] = 'Лимит с таким названием уже существует.';
             }
         } catch (Throwable $e) {
             $errors[] = 'Ошибка проверки уникальности названия: ' . $e->getMessage();
@@ -419,13 +405,13 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
         $price = (float)str_replace(',', '.', $priceRaw);
 
         // Генерируем code на основе названия: lower-case slug
-        $base = generatePlanCodeBase($title);
+        $base = generateLimitCodeBase($title);
 
         // Проверка уникальности кода
         $code = $base;
         $suffix = 1;
         try {
-            $check = $pdo->prepare("SELECT 1 FROM search_plans WHERE code = :c LIMIT 1");
+            $check = $pdo->prepare("SELECT 1 FROM search_limits WHERE code = :c LIMIT 1");
             while (true) {
                 $check->execute([':c' => $code]);
                 if (!$check->fetch()) {
@@ -440,7 +426,7 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
         }
 
         // ---------- МУЛЬТИЯЗЫЧНОСТЬ ОПИСАНИЯ ----------
-        $descriptionRu = $description !== '' ? $description : null;
+        $descriptionRu      = $description !== '' ? $description : null;
         $descriptionEnFinal = $descriptionEn !== '' ? $descriptionEn : null;
         $descriptionEsFinal = $descriptionEs !== '' ? $descriptionEs : null;
 
@@ -465,47 +451,26 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
             }
         }
 
-        // ---------- МУЛЬТИЯЗЫЧНЫЙ ПЕРИОД (duration_label_*) ----------
-        if ($durationValue > 0) {
-            if ($durationUnit === 'days') {
-                // RU
-                $unitRu = ru_plural($durationValue, 'день', 'дня', 'дней');
-                // EN
-                $unitEn = (abs($durationValue) === 1) ? 'day' : 'days';
-                // ES
-                $unitEs = (abs($durationValue) === 1) ? 'día' : 'días';
-            } else {
-                // months
-                $unitRu = ru_plural($durationValue, 'месяц', 'месяца', 'месяцев');
-                $unitEn = (abs($durationValue) === 1) ? 'month' : 'months';
-                $unitEs = (abs($durationValue) === 1) ? 'mes' : 'meses';
-            }
-
-            $durationLabelRu = $durationValue . ' ' . $unitRu;
-            $durationLabelEn = $durationValue . ' ' . $unitEn;
-            $durationLabelEs = $durationValue . ' ' . $unitEs;
-        } else {
-            // теоретический случай, но держим
-            $durationLabelRu = 'Без ограничения по сроку';
-            $durationLabelEn = 'No expiration';
-            $durationLabelEs = 'Sin fecha de vencimiento';
-        }
+        // ---------- МУЛЬТИЯЗЫЧНЫЙ ПЕРИОД (ВСЕГДА 1 ДЕНЬ) ----------
+        $durationDays = 1;
+        $durationLabelRu = $durationDays . ' ' . ru_plural($durationDays, 'день', 'дня', 'дней'); // "1 день"
+        $durationLabelEn = $durationDays . ' ' . ((abs($durationDays) === 1) ? 'day' : 'days');  // "1 day"
+        $durationLabelEs = $durationDays . ' ' . ((abs($durationDays) === 1) ? 'día' : 'días'); // "1 día"
 
         try {
             // ВСТАВКА С НОВЫМИ ПОЛЯМИ МУЛЬТИЯЗЫЧНОСТИ
             $stmt = $pdo->prepare("
-                INSERT INTO search_plans
+                INSERT INTO search_limits
                     (
                         code,
                         title,
-                        daily_limit,
+                        search_limit,
                         description,
                         description_ru,
                         description_en,
                         description_es,
                         price,
-                        duration_value,
-                        duration_unit,
+                        duration_days,
                         duration_label_ru,
                         duration_label_en,
                         duration_label_es,
@@ -516,14 +481,13 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
                     (
                         :code,
                         :title,
-                        :daily_limit,
+                        :search_limit,
                         :description,
                         :description_ru,
                         :description_en,
                         :description_es,
                         :price,
-                        :duration_value,
-                        :duration_unit,
+                        :duration_days,
                         :duration_label_ru,
                         :duration_label_en,
                         :duration_label_es,
@@ -533,22 +497,21 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
             ");
             $stmt->execute([
                 ':code'              => $code,
-                ':title'             => $title,                    // EN-название
-                ':daily_limit'       => $dailyLimit,
-                ':description'       => $descriptionRu,            // старое поле: RU как базовый
+                ':title'             => $title,                 // EN-название
+                ':search_limit'      => $searchLimit,
+                ':description'       => $descriptionRu,         // старое поле: RU как базовый
                 ':description_ru'    => $descriptionRu,
                 ':description_en'    => $descriptionEnFinal,
                 ':description_es'    => $descriptionEsFinal,
                 ':price'             => $price,
-                ':duration_value'    => $durationValue,
-                ':duration_unit'     => $durationUnit,
+                ':duration_days'     => $durationDays,
                 ':duration_label_ru' => $durationLabelRu,
                 ':duration_label_en' => $durationLabelEn,
                 ':duration_label_es' => $durationLabelEs,
                 ':sort_order'        => 0,
             ]);
 
-            $success = 'Тариф успешно создан. Код тарифа: ' . $code;
+            $success = 'Лимит успешно создан. Код лимита: ' . $code;
 
             // сбрасываем форму
             $title         = '';
@@ -556,11 +519,9 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
             $descriptionEn = '';
             $descriptionEs = '';
             $priceRaw      = '';
-            $durationValue = 30;
-            $durationUnit  = 'days';
-            $dailyLimit    = 10;
+            $searchLimit   = 10;
         } catch (Throwable $e) {
-            $errors[] = 'Ошибка при сохранении тарифа: ' . $e->getMessage();
+            $errors[] = 'Ошибка при сохранении лимита: ' . $e->getMessage();
         }
     }
 }
@@ -569,7 +530,7 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>Тарифы - Admin Panel</title>
+    <title>Лимиты поиска - Admin Panel</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -734,7 +695,7 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
         .card-header {
             padding: 16px 20px;
             border-bottom: 1px solid var(--border);
-            background: var(--bg-secondary);
+           	background: var(--bg-secondary);
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -801,13 +762,13 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
             color: var(--danger);
         }
 
-        .tariff-form-title{
+        .limit-form-title{
             display:flex;
             align-items:center;
             gap:10px;
             margin-bottom:12px;
         }
-        .tariff-form-icon{
+        .limit-form-icon{
             width:40px;
             height:40px;
             border-radius:999px;
@@ -820,7 +781,7 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
             font-size:22px;
             box-shadow:0 12px 30px rgba(0,0,0,.35);
         }
-        .tariff-form-subtitle{
+        .limit-form-subtitle{
             font-size:13px;
             color:var(--text-secondary);
             margin-top:2px;
@@ -847,7 +808,7 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
 
         .input,
         .textarea,
-        .tariff-select{
+        .limit-select{
             width:100%;
             box-sizing:border-box;
             background:rgba(15,23,42,0.9);
@@ -861,7 +822,7 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
         }
         .input:focus,
         .textarea:focus,
-        .tariff-select:focus{
+        .limit-select:focus{
             border-color:var(--accent);
             box-shadow:0 0 0 1px rgba(139,92,246,0.5);
         }
@@ -870,37 +831,26 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
             min-height:70px;
         }
 
-        .tariff-grid{
+        .limit-grid{
             display:flex;
             flex-direction:column;
             gap:12px;
             margin-top:8px;
         }
 
-        .tariff-duration-wrap{
-            display:grid;
-            grid-template-columns:2fr 1.2fr;
-            gap:10px;
-        }
-        @media(max-width:540px){
-            .tariff-duration-wrap{
-                grid-template-columns:1fr;
-            }
-        }
-
-        .tariff-msg{
+        .limit-msg{
             margin-bottom:10px;
             padding:10px 12px;
             border-radius:12px;
             font-size:13px;
             line-height:1.4;
         }
-        .tariff-msg.success{
+        .limit-msg.success{
             background:rgba(16,185,129,0.08);
             border:1px solid rgba(16,185,129,0.7);
             color:var(--success);
         }
-        .tariff-msg.error{
+        .limit-msg.error{
             background:rgba(239,68,68,0.06);
             border:1px solid rgba(248,113,113,0.8);
             color:var(--danger);
@@ -1033,7 +983,8 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
     <!-- Заголовок -->
     <div class="header">
         <div class="page-title">
-            <h1>Тарифы</h1>
+            <h1>Лимиты поиска</h1>
+            <p>Создание лимитов на количество успешных поисков за 1 день</p>
         </div>
         <div class="header-actions">
             <div class="admin-pill">
@@ -1050,8 +1001,8 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
     <div class="card">
         <div class="card-header">
             <h2>
-                <i class="fas fa-gem"></i>
-                Новый тариф
+                <i class="fas fa-layer-group"></i>
+                Новый лимит
             </h2>
             <div class="status-chip">
                 <span class="status-dot <?= $dbStatusOk ? 'ok' : 'bad' ?>"></span>
@@ -1061,26 +1012,26 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
             </div>
         </div>
         <div class="card-body">
-            <div class="tariff-form-title">
-                <div class="tariff-form-icon">💎</div>
+            <div class="limit-form-title">
+                <div class="limit-form-icon">⚡</div>
                 <div>
                     <div style="font-size:18px;font-weight:600;margin-bottom:2px;">
-                        Создание тарифа
+                        Создание лимита
                     </div>
-                    <div class="tariff-form-subtitle">
-                        Название — только на английском. Код тарифа формируется автоматически и использует это название.
+                    <div class="limit-form-subtitle">
+                        Название — только на английском. Лимит задаёт, сколько успешных поисков доступно в течение 1 дня.
                     </div>
                 </div>
             </div>
 
             <?php if (!empty($success)): ?>
-                <div class="tariff-msg success js-flash-msg">
+                <div class="limit-msg success js-flash-msg">
                     <?= h($success) ?>
                 </div>
             <?php endif; ?>
 
             <?php if (!empty($errors)): ?>
-                <div class="tariff-msg error js-flash-msg">
+                <div class="limit-msg error js-flash-msg">
                     <?php foreach ($errors as $err): ?>
                         <div><?= h($err) ?></div>
                     <?php endforeach; ?>
@@ -1088,16 +1039,16 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
             <?php endif; ?>
 
             <?php if (!$dbStatusOk): ?>
-                <div class="tariff-msg error js-flash-msg">
+                <div class="limit-msg error js-flash-msg">
                     База данных недоступна. Проверь .env / соединение.
                 </div>
             <?php else: ?>
-                <form method="post" class="form" id="tariff-form">
-                    <div class="tariff-grid">
+                <form method="post" class="form" id="limit-form">
+                    <div class="limit-grid">
                         <!-- Название -->
                         <div>
                             <label class="field-label">
-                                <span>Название тарифа</span>
+                                <span>Название лимита</span>
                                 <span class="badge-mini">EN only</span>
                             </label>
                             <input type="text"
@@ -1107,7 +1058,7 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
                                    maxlength="100"
                                    required
                                    value="<?= h($title) ?>"
-                                   placeholder="Например: Start, Premium, VIP">
+                                   placeholder="Например: Basic Pack, Pro Limit">
                             <div class="inline-hint">
                                 Латиница, цифры, пробелы и символы - _ . ( ). Русские буквы запрещены.
                             </div>
@@ -1121,14 +1072,14 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
                         <!-- Описание + мультиязычный блок -->
                         <div>
                             <label class="field-label">
-                                <span>Описание тарифа</span>
+                                <span>Описание лимита</span>
                                 <span class="badge-mini">Основной текст — RU</span>
                             </label>
                             <textarea name="description"
                                       id="desc_ru"
                                       class="textarea"
                                       rows="3"
-                                      placeholder="Что даёт тариф (лимиты, бонусы и т.д.) — на русском"><?= h($description) ?></textarea>
+                                      placeholder="Что даёт лимит (сколько поисков, особенности и т.д.) — на русском"><?= h($description) ?></textarea>
                             <div class="inline-hint">
                                 Русская версия будет сохранена в БД. Ниже — черновики EN / ES, генерируются автоматически (можно править).
                             </div>
@@ -1181,49 +1132,46 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
                                    min="0"
                                    required
                                    value="<?= h($priceRaw) ?>"
-                                   placeholder="Например: 199 или 499.90">
+                                   placeholder="Например: 99 или 249.90">
                         </div>
 
-                        <!-- Длительность + период -->
-                        <div class="tariff-duration-wrap">
-                            <div>
-                                <label class="field-label">Длительность</label>
-                                <input type="number"
-                                       name="duration_value"
-                                       id="duration_value"
-                                       class="input"
-                                       min="1"
-                                       required
-                                       value="<?= (int)$durationValue ?>"
-                                       placeholder="Например: 7, 30, 90">
-                            </div>
-                            <div>
-                                <label class="field-label">Период</label>
-                                <select name="duration_unit" id="duration_unit" class="input tariff-select">
-                                    <option value="days"   <?= $durationUnit === 'days'   ? 'selected' : '' ?>>дней</option>
-                                    <option value="months" <?= $durationUnit === 'months' ? 'selected' : '' ?>>месяцев</option>
-                                </select>
-                            </div>
-                        </div>
-
-                        <!-- Превью периода на 3 языках -->
-                        <div class="duration-preview" id="duration-preview">
-                            <div class="duration-preview-title">Период действия тарифа · превью на 3 языках</div>
-                            <div class="duration-preview-row" id="duration-preview-row">
-                                <!-- JS отрисует чипы -->
-                            </div>
-                        </div>
-
-                        <!-- Лимит -->
+                        <!-- Количество успешных поисков за 1 день -->
                         <div>
-                            <label class="field-label">Лимит успешных поисков в сутки</label>
+                            <label class="field-label">
+                                <span>Доступно успешных поисков за 1 день</span>
+                            </label>
                             <input type="number"
-                                   name="daily_limit"
+                                   name="search_limit"
                                    class="input"
-                                   min="0"
+                                   min="1"
                                    required
-                                   value="<?= (int)$dailyLimit ?>"
-                                   placeholder="Например: 10, 20, 50">
+                                   value="<?= (int)$searchLimit ?>"
+                                   placeholder="Например: 10, 25, 50">
+                            <div class="inline-hint">
+                                Именно столько успешных поисков пользователь сможет выполнить в течение одного дня.
+                            </div>
+                        </div>
+
+                        <!-- Превью периода на 3 языках (всегда 1 день) -->
+                        <div class="duration-preview">
+                            <div class="duration-preview-title">Период действия лимита · фиксирован 1 день</div>
+                            <div class="duration-preview-row">
+                                <div class="duration-chip">
+                                    <span class="lang">RU</span>
+                                    <span>1 день</span>
+                                </div>
+                                <div class="duration-chip">
+                                    <span class="lang">EN</span>
+                                    <span>1 day</span>
+                                </div>
+                                <div class="duration-chip">
+                                    <span class="lang">ES</span>
+                                    <span>1 día</span>
+                                </div>
+                            </div>
+                            <div class="inline-hint" style="margin-top:6px;">
+                                Период менять нельзя — все лимиты рассчитаны ровно на 1 календарный день.
+                            </div>
                         </div>
 
                         <!-- Кнопка -->
@@ -1232,7 +1180,7 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
                                     class="btn btn-primary"
                                     style="width:100%;justify-content:center;">
                                 <i class="fas fa-plus-circle"></i>
-                                Создать тариф
+                                Создать лимит
                             </button>
                         </div>
                     </div>
@@ -1259,7 +1207,7 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
         });
     });
 
-    // ---------- AJAX-проверка названия тарифа ----------
+    // ---------- AJAX-проверка названия лимита ----------
     (function () {
         const input = document.getElementById('title-input');
         const statusEl = document.getElementById('title-status');
@@ -1299,7 +1247,7 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
                 return;
             }
             codePreviewEl.style.display = 'block';
-            codePreviewEl.textContent = 'Код тарифа будет: ' + code;
+            codePreviewEl.textContent = 'Код лимита будет: ' + code;
         }
 
         input.addEventListener('input', function () {
@@ -1340,7 +1288,7 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
                 body.append('ajax', 'check_title');
                 body.append('title', val);
 
-                fetch('new_tariffs.php', {
+                fetch('new_limit.php', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
@@ -1355,7 +1303,7 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
                         } else if (data.is_unique) {
                             setStatus('ok', 'Название свободно, можно использовать.', 'fa-regular fa-circle-check');
                         } else {
-                            setStatus('error', 'Тариф с таким названием уже существует.', 'fa-solid fa-circle-xmark');
+                            setStatus('error', 'Лимит с таким названием уже существует.', 'fa-solid fa-circle-xmark');
                         }
 
                         updateCodePreview(data.code || data.slug_base || '');
@@ -1370,7 +1318,7 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
         });
     })();
 
-    // ---------- Авто-перевод описания тарифа RU → EN / ES ----------
+    // ---------- Авто-перевод описания лимита RU → EN / ES ----------
     (function () {
         const ru = document.getElementById('desc_ru');
         const ruShadow = document.getElementById('desc_ru_shadow');
@@ -1433,7 +1381,7 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
                 body.append('ajax', 'translate_description');
                 body.append('text_ru', trimmed);
 
-                fetch('new_tariffs.php', {
+                fetch('new_limit.php', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
@@ -1478,85 +1426,6 @@ if ($dbStatusOk && $_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['ajax'
 
         // инициализируем тень, если описание уже было
         ruShadow.value = ru.value;
-    })();
-
-    // ---------- Красивое превью периода на 3 языках ----------
-    (function () {
-        const valInput = document.getElementById('duration_value');
-        const unitSelect = document.getElementById('duration_unit');
-        const row = document.getElementById('duration-preview-row');
-        if (!valInput || !unitSelect || !row) return;
-
-        function pluralRuDays(n) {
-            n = Math.abs(parseInt(n, 10) || 0);
-            const mod10 = n % 10;
-            const mod100 = n % 100;
-            if (mod10 === 1 && mod100 !== 11) return 'день';
-            if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return 'дня';
-            return 'дней';
-        }
-        function pluralRuMonths(n) {
-            n = Math.abs(parseInt(n, 10) || 0);
-            const mod10 = n % 10;
-            const mod100 = n % 100;
-            if (mod10 === 1 && mod100 !== 11) return 'месяц';
-            if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return 'месяца';
-            return 'месяцев';
-        }
-        function pluralEnDays(n) { return (Math.abs(n) === 1 ? 'day' : 'days'); }
-        function pluralEnMonths(n) { return (Math.abs(n) === 1 ? 'month' : 'months'); }
-        function pluralEsDays(n) { return (Math.abs(n) === 1 ? 'día' : 'días'); }
-        function pluralEsMonths(n) { return (Math.abs(n) === 1 ? 'mes' : 'meses'); }
-
-        function render() {
-            const nRaw = valInput.value;
-            const n = parseInt(nRaw, 10) || 0;
-            const unit = unitSelect.value === 'months' ? 'months' : 'days';
-
-            row.innerHTML = '';
-
-            if (n <= 0) {
-                const span = document.createElement('span');
-                span.style.fontSize = '11px';
-                span.style.color = 'var(--text-muted)';
-                span.textContent = 'Укажите длительность — и здесь появится красивое превью для RU / EN / ES.';
-                row.appendChild(span);
-                return;
-            }
-
-            let ruTxt, enTxt, esTxt;
-            if (unit === 'days') {
-                ruTxt = n + ' ' + pluralRuDays(n);
-                enTxt = n + ' ' + pluralEnDays(n);
-                esTxt = n + ' ' + pluralEsDays(n);
-            } else {
-                ruTxt = n + ' ' + pluralRuMonths(n);
-                enTxt = n + ' ' + pluralEnMonths(n);
-                esTxt = n + ' ' + pluralEsMonths(n);
-            }
-
-            function chip(lang, text) {
-                const d = document.createElement('div');
-                d.className = 'duration-chip';
-                const spanLang = document.createElement('span');
-                spanLang.className = 'lang';
-                spanLang.textContent = lang;
-                const spanText = document.createElement('span');
-                spanText.textContent = text;
-                d.appendChild(spanLang);
-                d.appendChild(spanText);
-                return d;
-            }
-
-            row.appendChild(chip('RU', ruTxt));
-            row.appendChild(chip('EN', enTxt));
-            row.appendChild(chip('ES', esTxt));
-        }
-
-        valInput.addEventListener('input', render);
-        unitSelect.addEventListener('change', render);
-
-        render();
     })();
 </script>
 </body>
